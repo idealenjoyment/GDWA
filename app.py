@@ -57,7 +57,7 @@ else:
     st.sidebar.caption("📂 No local cache found.")
 
 # Default selection (robust check)
-desired_defaults = ["SP500", "NIFTY", "SILVER", "USD", "BTC"]
+desired_defaults = ["SP500", "NIFTY", "SILVER", "USD", "INR"]
 default_assets = [a for a in desired_defaults if a in all_assets]
 
 selected_assets = st.sidebar.multiselect("Assets to Compare", all_assets, default=default_assets)
@@ -81,7 +81,7 @@ for asset in fetch_list:
     if asset in deps:
         final_fetch_list.add(deps[asset])
 
-# --- Sequential Data Loading ---
+# --- Data Loading / Refreshing ---
 
 # Persistent state for raw data
 if 'raw_df' not in st.session_state:
@@ -99,57 +99,44 @@ asset_queue = [a for a in selected_assets if a not in base_assets and a != "USD"
 all_to_load = base_assets + asset_queue
 total_steps = len(all_to_load)
 
-progress_bar = st.progress(0, text="Preparing to load data...")
-status_container = st.empty()
+# Add Refresh Button to the Sidebar
+st.sidebar.divider()
+refresh_clicked = st.sidebar.button("🔄 Refresh Data", type="primary", use_container_width=True, help="Fetch latest data from Yahoo Finance into local cache")
+
+if refresh_clicked:
+    progress_bar = st.progress(0, text="Preparing to refresh data...")
+    status_container = st.empty()
+    
+    for step_idx, asset_name in enumerate(all_to_load):
+        ticker = gold_loader.get_ticker_map().get(asset_name)
+        if not ticker: continue
+        
+        progress_pct = (step_idx) / total_steps
+        progress_bar.progress(progress_pct, text=f"Fetching {asset_name} ({step_idx + 1}/{total_steps})...")
+        
+        with status_container.status(f"Syncing {asset_name}...") as s:
+            gold_loader.fetch_data_with_persistence([ticker], start_date, end_date)
+            s.update(label=f"✅ {asset_name} synced", state="complete")
+            
+    progress_bar.empty()
+    status_container.empty()
+
+# Always read what's currently in cache for the required tickers
+all_tickers = [gold_loader.get_ticker_map().get(a) for a in all_to_load if gold_loader.get_ticker_map().get(a)]
+st.session_state.raw_df = gold_loader.get_close_prices(all_tickers, start_date, end_date)
 
 successfully_loaded = []
 gold_ticker = gold_loader.get_ticker_map()["GOLD"]
 
-for step_idx, asset_name in enumerate(all_to_load):
-    ticker = gold_loader.get_ticker_map().get(asset_name)
-    if not ticker:
-        continue
-
-    progress_pct = (step_idx) / total_steps
-    progress_bar.progress(progress_pct, text=f"Loading {asset_name} ({step_idx + 1}/{total_steps})...")
-
-    # Check if we already have this ticker with valid data
-    already_cached = (
-        ticker in st.session_state.raw_df.columns
-        and not st.session_state.raw_df[ticker].isna().all()
-    )
-
-    if not already_cached:
-        with status_container.status(f"Fetching {asset_name}...") as s:
-            asset_data = gold_loader.fetch_data_with_persistence([ticker], start_date, end_date)
-            if not asset_data.empty:
-                st.session_state.raw_df = pd.concat(
-                    [st.session_state.raw_df, asset_data], axis=1
-                )
-                st.session_state.raw_df = st.session_state.raw_df.loc[
-                    :, ~st.session_state.raw_df.columns.duplicated()
-                ]
-                st.session_state.raw_df = (
-                    st.session_state.raw_df[~st.session_state.raw_df.index.duplicated(keep='last')]
-                    .sort_index()
-                )
-                s.update(label=f"✅ {asset_name} loaded", state="complete")
-            else:
-                s.update(label=f"⚠️ {asset_name} — no data (rate limited?)", state="error")
-
-    # Validate that GOLD loaded successfully (required for everything else)
-    if asset_name == "GOLD":
-        if gold_ticker not in st.session_state.raw_df.columns or st.session_state.raw_df[gold_ticker].isna().all():
-            progress_bar.empty()
-            status_container.empty()
-            st.error("⚠️ **Gold data (GC=F) is currently unavailable.**")
-            st.info("This is usually due to Yahoo Finance rate limiting. Please wait a minute and click 'Retry'.")
-            if st.button("Retry Load"):
-                st.rerun()
-            st.stop()
-
+# Validate that GOLD loaded successfully (required for everything else)
+if gold_ticker not in st.session_state.raw_df.columns or st.session_state.raw_df[gold_ticker].isna().all():
+    st.error("⚠️ **Gold data (GC=F) is currently unavailable in the local cache.**")
+    st.info("Please click the '🔄 Refresh Data' button in the sidebar to download data from Yahoo Finance.")
+    st.stop()
+else:
     # Track successfully loaded selected assets
-    if asset_name in selected_assets and asset_name != "GOLD":
+    for asset_name in selected_assets:
+        if asset_name == "GOLD": continue
         t = gold_loader.get_ticker_map().get(asset_name)
         if t and t in st.session_state.raw_df.columns and not st.session_state.raw_df[t].isna().all():
             successfully_loaded.append(asset_name)
@@ -157,9 +144,6 @@ for step_idx, asset_name in enumerate(all_to_load):
 # USD is synthetic — always available
 if "USD" in selected_assets:
     successfully_loaded.append("USD")
-
-progress_bar.progress(1.0, text="All assets loaded!")
-status_container.empty()
 
 # --- Render Charts (single pass) ---
 
