@@ -6,6 +6,9 @@ import time
 import random
 import datetime
 
+# Delay (in seconds) between consecutive Yahoo Finance API calls to avoid rate limits
+FETCH_DELAY = 2.0
+
 # Mapping of asset keys to Yahoo Finance Tickers
 ASSET_TICKERS = {
     # Benchmark
@@ -71,15 +74,21 @@ def retry_yf_download(tickers, start, end, max_retries=3):
         # Even before first try, be a bit nice if we are in a loop
         time.sleep(random.uniform(0.5, 1.5))
         try:
-            # We fetch OHLCV (all columns)
-            data = yf.download(tickers, start=start, end=end, progress=False)
+            # auto_adjust=False to avoid deprecation warning in yfinance >=0.2.50
+            data = yf.download(tickers, start=start, end=end, progress=False, auto_adjust=False)
             if data is not None and not data.empty:
                 return data
-            # If empty but no exception, might be weekend or holiday
+            # If empty but no exception, might be weekend/holiday or rate limited
+            # yfinance 0.2.55 sometimes returns empty df on rate limit without raising
+            if i < max_retries - 1:
+                wait_time = (3 * (2 ** i)) + random.uniform(1, 3)
+                print(f"Empty result for {tickers}. Retrying in {wait_time:.1f}s... (Attempt {i+1}/{max_retries})")
+                time.sleep(wait_time)
+                continue
             return pd.DataFrame()
         except Exception as e:
             msg = str(e)
-            if "Too Many Requests" in msg or "Rate limit" in msg:
+            if "Too Many Requests" in msg or "Rate limit" in msg or "rate" in msg.lower():
                 # More aggressive backoff: 5s, 15s, 45s...
                 wait_time = (5 * (3 ** i)) + random.uniform(2, 5)
                 warning_text = f"Yahoo rate limit hit. Retrying in {wait_time:.1f}s... (Attempt {i+1}/{max_retries})"
@@ -150,36 +159,37 @@ def sync_asset(ticker, start_dt, end_dt):
     """Syncs a single asset's local storage with Yahoo Finance."""
     existing_df = load_asset_data(ticker)
     
-    needs_fetch = False
-    fetch_start = start_dt
-    fetch_end = end_dt
+    fetch_ranges = []
     
     if existing_df.empty:
-        needs_fetch = True
+        fetch_ranges.append((start_dt, end_dt))
     else:
         cache_start = existing_df.index.min()
         cache_end = existing_df.index.max()
         
+        # Need earlier data?
         if start_dt < cache_start:
-            needs_fetch = True
-            fetch_end = cache_start
+            fetch_ranges.append((start_dt, cache_start - pd.Timedelta(days=1)))
         
+        # Need newer data?
         if end_dt > cache_end:
-            needs_fetch = True
-            fetch_start = cache_end + pd.Timedelta(days=1)
-            fetch_end = end_dt
+            fetch_ranges.append((cache_end + pd.Timedelta(days=1), end_dt))
 
-    if needs_fetch and fetch_start < fetch_end:
+    for fetch_start, fetch_end in fetch_ranges:
+        if fetch_start >= fetch_end:
+            continue
         new_data = retry_yf_download([ticker], fetch_start, fetch_end)
         if not new_data.empty:
             # Standardize to TZ-naive
             if new_data.index.tz is not None:
                 new_data.index = new_data.index.tz_localize(None)
                 
-            # Flatten multi-index if it exists
+            # Flatten multi-index if it exists (yfinance >=0.2.50)
             if isinstance(new_data.columns, pd.MultiIndex):
                 new_data.columns = new_data.columns.get_level_values(0)
             save_asset_data(ticker, new_data)
+        # Rate-limit-friendly delay between API calls
+        time.sleep(FETCH_DELAY)
 
 def get_close_prices(tickers, start_date, end_date):
     """Combines 'Close' prices from individual asset files into a single dataframe."""

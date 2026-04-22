@@ -25,9 +25,10 @@ def plot_drawdown_heatmap(df):
     We can do a Facet plot or just overlaid lines for now (easier to read interactively).
     Let's try overlaid lines first, but if too messy, we can refactor.
     """
-    # Calculate drawdown
-    rolling_max = df.cummax()
-    drawdown = (df - rolling_max) / rolling_max
+    # Calculate drawdown — drop NaN to avoid cummax issues with different start dates
+    clean_df = df.dropna(how='all')
+    rolling_max = clean_df.cummax()
+    drawdown = (clean_df - rolling_max) / rolling_max
     
     fig = px.area(drawdown, title="Underwater Drawdown vs Gold")
     fig.update_layout(

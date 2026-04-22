@@ -8,25 +8,35 @@ def calculate_metrics(gold_denominated_series):
     - Annualized Volatility
     - Max Drawdown
     """
-    # CAGR
-    start_val = gold_denominated_series.iloc[0]
-    end_val = gold_denominated_series.iloc[-1]
-    years = (gold_denominated_series.index[-1] - gold_denominated_series.index[0]).days / 365.25
-    if years <= 0:
+    # Drop NaN values to get the actual data range for this asset
+    clean_series = gold_denominated_series.dropna()
+    
+    if clean_series.empty or len(clean_series) < 2:
+        return {
+            "CAGR": 0.0,
+            "Volatility": 0.0,
+            "Max Drawdown": 0.0
+        }
+    
+    # CAGR — use first/last valid values
+    start_val = clean_series.iloc[0]
+    end_val = clean_series.iloc[-1]
+    years = (clean_series.index[-1] - clean_series.index[0]).days / 365.25
+    if years <= 0 or start_val == 0 or pd.isna(start_val) or pd.isna(end_val):
         cagr = 0.0
     else:
         cagr = (end_val / start_val) ** (1 / years) - 1
 
     # Returns
     # Using fill_method=None to avoid deprecation warning as per Pandas 2.1+
-    daily_returns = gold_denominated_series.pct_change(fill_method=None).dropna()
+    daily_returns = clean_series.pct_change(fill_method=None).dropna()
     
     # Volatility (Annualized)
     volatility = daily_returns.std() * np.sqrt(252)
     
-    # Max Drawdown
-    rolling_max = gold_denominated_series.cummax()
-    drawdown = (gold_denominated_series - rolling_max) / rolling_max
+    # Max Drawdown — computed on clean (non-NaN) series
+    rolling_max = clean_series.cummax()
+    drawdown = (clean_series - rolling_max) / rolling_max
     max_drawdown = drawdown.min()
     
     return {

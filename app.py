@@ -81,129 +81,144 @@ for asset in fetch_list:
     if asset in deps:
         final_fetch_list.add(deps[asset])
 
-# --- Incremental Data Loading ---
-
-# Placeholders for UI components that will be updated incrementally
-main_chart_placeholder = st.empty()
-col1, col2 = st.columns(2)
-drawdown_placeholder = col1.empty()
-corr_placeholder = col2.empty()
-vol_placeholder = st.empty()
-metrics_overlay = st.empty()
+# --- Sequential Data Loading ---
 
 # Persistent state for raw data
 if 'raw_df' not in st.session_state:
     st.session_state.raw_df = pd.DataFrame()
 
-# We need GOLD first as it is the denominator
-initial_assets = ["GOLD"]
-# Add dependencies (like INR for Nifty)
+# Build complete ordered fetch list: base assets first, then selected assets
+# Base assets = GOLD + any currency dependencies
+base_assets = ["GOLD"]
 for asset in selected_assets:
-    if asset in deps:
-        initial_assets.append(deps[asset])
+    if asset in deps and deps[asset] not in base_assets:
+        base_assets.append(deps[asset])
 
-# Combine into a unique list of tickers to fetch
-to_fetch_immediately = list(set([gold_loader.get_ticker_map()[a] for a in initial_assets if a in gold_loader.get_ticker_map()]))
+# Selected assets (excluding GOLD, USD, and already-in-base currencies)
+asset_queue = [a for a in selected_assets if a not in base_assets and a != "USD"]
+all_to_load = base_assets + asset_queue
+total_steps = len(all_to_load)
 
-with st.spinner("Fetching base data (Gold & Currencies)..."):
-    base_data = gold_loader.fetch_data_with_persistence(to_fetch_immediately, start_date, end_date)
-    # Check if we got GOLD
-    gold_ticker = gold_loader.get_ticker_map()["GOLD"]
-    if gold_ticker in base_data.columns and not base_data[gold_ticker].isna().all():
-        st.session_state.raw_df = base_data
-    else:
-        st.error("⚠️ **Gold data (GC=F) is currently unavailable.**")
-        st.info("This is usually due to Yahoo Finance rate limiting. Please wait a minute and click 'Retry'.")
-        if st.button("Retry Load"):
-            st.rerun()
-        st.stop()
+progress_bar = st.progress(0, text="Preparing to load data...")
+status_container = st.empty()
 
-# Debug: Show column count
-if not st.session_state.raw_df.empty:
-    st.sidebar.success(f"✅ Cached {len(st.session_state.raw_df.columns)} assets")
-else:
-    st.sidebar.warning("No data in session state.")
-
-# Loop through selected assets incrementally
 successfully_loaded = []
-for asset_name in selected_assets:
-    if asset_name == "USD":
-        successfully_loaded.append("USD")
-        continue # Synthetic handled in processor
-    if asset_name == "GOLD":
-        continue # Benchmark
-        
+gold_ticker = gold_loader.get_ticker_map()["GOLD"]
+
+for step_idx, asset_name in enumerate(all_to_load):
     ticker = gold_loader.get_ticker_map().get(asset_name)
     if not ticker:
         continue
-        
-    # Check if we already have this ticker populated in session state
-    if ticker not in st.session_state.raw_df.columns or st.session_state.raw_df[ticker].isna().all():
-        with st.status(f"Loading {asset_name}...") as s:
+
+    progress_pct = (step_idx) / total_steps
+    progress_bar.progress(progress_pct, text=f"Loading {asset_name} ({step_idx + 1}/{total_steps})...")
+
+    # Check if we already have this ticker with valid data
+    already_cached = (
+        ticker in st.session_state.raw_df.columns
+        and not st.session_state.raw_df[ticker].isna().all()
+    )
+
+    if not already_cached:
+        with status_container.status(f"Fetching {asset_name}...") as s:
             asset_data = gold_loader.fetch_data_with_persistence([ticker], start_date, end_date)
             if not asset_data.empty:
-                # Merge columns safely using concat (handles index alignment)
-                st.session_state.raw_df = pd.concat([st.session_state.raw_df, asset_data], axis=1)
-                st.session_state.raw_df = st.session_state.raw_df.loc[:, ~st.session_state.raw_df.columns.duplicated()]
-                st.session_state.raw_df = st.session_state.raw_df[~st.session_state.raw_df.index.duplicated(keep='last')].sort_index()
-                s.update(label=f"{asset_name} loaded!", state="complete")
+                st.session_state.raw_df = pd.concat(
+                    [st.session_state.raw_df, asset_data], axis=1
+                )
+                st.session_state.raw_df = st.session_state.raw_df.loc[
+                    :, ~st.session_state.raw_df.columns.duplicated()
+                ]
+                st.session_state.raw_df = (
+                    st.session_state.raw_df[~st.session_state.raw_df.index.duplicated(keep='last')]
+                    .sort_index()
+                )
+                s.update(label=f"✅ {asset_name} loaded", state="complete")
             else:
-                s.update(label=f"Failed to load {asset_name} (Rate limited or missing data)", state="error")
+                s.update(label=f"⚠️ {asset_name} — no data (rate limited?)", state="error")
 
-    # If it's now in the session state (or was already), add to render list
-    if ticker in st.session_state.raw_df.columns and not st.session_state.raw_df[ticker].isna().all():
-        successfully_loaded.append(asset_name)
+    # Validate that GOLD loaded successfully (required for everything else)
+    if asset_name == "GOLD":
+        if gold_ticker not in st.session_state.raw_df.columns or st.session_state.raw_df[gold_ticker].isna().all():
+            progress_bar.empty()
+            status_container.empty()
+            st.error("⚠️ **Gold data (GC=F) is currently unavailable.**")
+            st.info("This is usually due to Yahoo Finance rate limiting. Please wait a minute and click 'Retry'.")
+            if st.button("Retry Load"):
+                st.rerun()
+            st.stop()
 
-    # Update the UI with everything loaded so far
+    # Track successfully loaded selected assets
+    if asset_name in selected_assets and asset_name != "GOLD":
+        t = gold_loader.get_ticker_map().get(asset_name)
+        if t and t in st.session_state.raw_df.columns and not st.session_state.raw_df[t].isna().all():
+            successfully_loaded.append(asset_name)
+
+# USD is synthetic — always available
+if "USD" in selected_assets:
+    successfully_loaded.append("USD")
+
+progress_bar.progress(1.0, text="All assets loaded!")
+status_container.empty()
+
+# --- Render Charts (single pass) ---
+
+if not st.session_state.raw_df.empty:
+    st.sidebar.success(f"✅ Active: {', '.join(successfully_loaded)}")
+else:
+    st.sidebar.warning("No data in session state.")
+
+if successfully_loaded:
     try:
-        # Determine available assets for this iteration
-        # Always include GOLD and dependencies
-        render_friendly = list(set(initial_assets + successfully_loaded))
-        current_ticker_map = {a: gold_loader.get_ticker_map()[a] for a in render_friendly if a in gold_loader.get_ticker_map()}
-        
+        render_friendly = list(set(base_assets + successfully_loaded))
+        current_ticker_map = {
+            a: gold_loader.get_ticker_map()[a]
+            for a in render_friendly
+            if a in gold_loader.get_ticker_map()
+        }
+
         normalized_df, metrics_df = gold_processor.process_data(
-            st.session_state.raw_df, 
-            current_ticker_map, 
-            gold_loader.CURRENCY_MAPPING
+            st.session_state.raw_df,
+            current_ticker_map,
+            gold_loader.CURRENCY_MAPPING,
         )
-        
-        # Filter for display (exclude benchmarking helpers like INR/JPY unless selected)
+
         display_cols = [c for c in selected_assets if c in normalized_df.columns]
-        if not display_cols:
-            continue
-            
-        final_ts_df = normalized_df[display_cols]
-        final_metrics_df = metrics_df.loc[display_cols]
 
-        # Update Placeholders
-        with main_chart_placeholder.container():
+        if display_cols:
+            final_ts_df = normalized_df[display_cols]
+            final_metrics_df = metrics_df.loc[display_cols]
+
             st.subheader("📈 Performance vs Gold")
-            st.plotly_chart(charts.plot_normalized_performance(final_ts_df), use_container_width=True)
+            st.plotly_chart(
+                charts.plot_normalized_performance(final_ts_df), use_container_width=True
+            )
 
-        with drawdown_placeholder.container():
-            st.subheader("📉 Drawdowns")
-            st.plotly_chart(charts.plot_drawdown_heatmap(final_ts_df), use_container_width=True)
+            col1, col2 = st.columns(2)
+            with col1:
+                st.subheader("📉 Drawdowns")
+                st.plotly_chart(
+                    charts.plot_drawdown_heatmap(final_ts_df), use_container_width=True
+                )
+            with col2:
+                st.subheader("📊 Correlation Matrix")
+                st.plotly_chart(
+                    charts.plot_correlation_heatmap(final_ts_df), use_container_width=True
+                )
 
-        with corr_placeholder.container():
-            st.subheader("📊 Correlation Matrix")
-            st.plotly_chart(charts.plot_correlation_heatmap(final_ts_df), use_container_width=True)
-
-        with vol_placeholder.container():
             st.subheader("⚡ Rolling Volatility (30D)")
-            st.plotly_chart(charts.plot_rolling_vol(final_ts_df), use_container_width=True)
+            st.plotly_chart(
+                charts.plot_rolling_vol(final_ts_df), use_container_width=True
+            )
 
-        with metrics_overlay.container():
             st.subheader("📋 Summary Statistics")
-            st.dataframe(final_metrics_df.style.format("{:.2%}"), use_container_width=True)
+            st.dataframe(
+                final_metrics_df.style.format("{:.2%}"), use_container_width=True
+            )
 
     except Exception as e:
-        if asset_name in successfully_loaded:
-            st.error(f"Error rendering {asset_name}: {e}")
-
-# Update sidebar status once more at the end
-if not st.session_state.raw_df.empty:
-    loaded_tickers = [t for t in st.session_state.raw_df.columns if not st.session_state.raw_df[t].isna().all()]
-    st.sidebar.success(f"✅ Active: {', '.join(successfully_loaded)}")
+        st.error(f"Error rendering charts: {e}")
 
 st.divider()
 st.caption("Data source: Yahoo Finance. 'Price in Gold' calculated as USD Price of Asset / USD Price of Gold.")
+
