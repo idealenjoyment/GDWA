@@ -2,7 +2,7 @@
 
 Benchmark major global assets against **Gold** (XAU) to see their true purchasing power performance, stripped of fiat currency inflation and volatility.
 
-![Dashboard Preview](https://github.com/user-attachments/assets/vibrant-ui-placeholder) 
+![Dashboard Preview](https://github.com/idealenjoyment/GDWA/blob/main/blob/dashboard_preview.png) 
 
 ## 🚀 Features
 
